@@ -1,1 +1,28 @@
+# ------------------------------------------------------------------
+# File Name     : informix-server.service
+# Author        : Ihor Zaiets
+# Description   : Informix service Start-Stop script for Linux
+# Last Modified : 02-Jan-2020 
+#
+# Installations:
+# 1. Save file as  /usr/lib/systemd/system/informix-server.service
+# 2. Enable service systemctl  enable informix-server.service
+# ------------------------------------------------------------------
 
+[Unit]
+Description=IBM Informix Database Server
+Documentation=file:/opt/IBM/informix/release/en_us/0333 http://www.ibm.com/software/data/informix/library.html
+Wants=network-online.target
+After=network.target network-online.target
+
+[Service]
+Type=oneshot
+User=informix
+Group=informix
+RemainAfterExit=yes
+Environment="IDSPROFILE=/etc/informix/server"
+ExecStart=/bin/sh -a -c 'source $IDSPROFILE && $INFORMIXDIR/bin/oninit'
+ExecStop=/bin/sh  -a -c 'source $IDSPROFILE && $INFORMIXDIR/bin/onmode -ky'
+
+[Install]
+WantedBy=multi-user.target

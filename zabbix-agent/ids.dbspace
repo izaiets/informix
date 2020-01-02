@@ -1,0 +1,132 @@
+#!/bin/sh 
+# --------------------------------------------------------------------------------------------------------------------------------------------
+# IDS dbspaces statistics for zabbix
+# Date: 2018-05-29
+# Owner: Igor Zaiets 
+# --------------------------------------------------------------------------------------------------------------------------------------------
+# set path to awk
+AWKSERV_OS=`uname`
+if [ "$AWKSERV_OS" = "SunOS" ] ; then AWK=/bin/nawk ; else AWK=/bin/awk ; fi
+# --------------------------------------------------------------------------------------------------------------------------------------------
+# Set IDS environments and check IDS status
+IDS_PROFILE=/etc/zabbix/scripts/ids.env
+test -f $IDS_PROFILE && . $IDS_PROFILE
+onstat - >/dev/null 2>&1
+if   [ $? -ne 5 ]
+  then
+    echo "onstat: command not found"
+    exit
+fi
+# --------------------------------------------------------------------------------------------------------------------------------------------
+# Specific env.
+INFORMIXCONRETRY=1 ; export INFORMIXCONRETRY
+INFORMIXCONTIME=1  ; export INFORMIXCONTIME
+# --------------------------------------------------------------------------------------------------------------------------------------------
+# Check IDS for running
+check_ids () {
+   onstat - >/dev/null 2>&1
+   if [ $? -eq 255 ] ; then echo "IDS is unavailable" ; exit 1 ; fi
+}
+# --------------------------------------------------------------------------------------------------------------------------------------------
+   #OUTPUT1=`mktemp -t zabbix.dbsuse1.XXXX`
+   #OUTPUT2=`mktemp -t zabbix.dbsuse2.XXXX`
+# --------------------------------------------------------------------------------------------------------------------------------------------
+# Print JSON for ids.dbspace.discovery 
+dbs_list () {
+onstat -d  |  $AWK 'BEGIN{
+          printf("{\n")
+          printf("   \"data\": [\n")
+          num_db=0
+        }
+
+
+  $1=="Dbspaces"{
+	  getline 
+          while ( getline >= 0 )
+	  { 
+            if ( $2 == "active," ) break
+	    f_start=index($0,$7); f=substr($0,f_start,6)
+  	    if ( num_db == 1 ) { printf("              ,\n") }
+    	    printf("              {\n")
+
+  	    printf("                \"{#DBS_NAME}\": \"%s\"\n",$NF)
+
+  	    #printf("                \"{#DBS_NAME}\": \"%s\",\n",$NF)
+  	    #printf("                \"{#DBS_FLAG}\": \"%s\"\n",f )
+
+	    printf("              }\n")
+	    num_db = 1
+	 }
+
+         }
+   END{
+	  printf("   ]\n")
+	  printf("}\n") 
+      } '
+    
+}
+# --------------------------------------------------------------------------------------------------------------------------------------------
+# Print JSON with dbspace size for ids.dbspace.size
+dbs_size () {
+   # 
+   if [ $# -ne 1 ] ; then echo "ZBX_NOTSUPPORTED" ; exit 1 ; fi
+   # dbspace_name
+   DBS_NAME=$1
+
+   # Check dbspace name
+   DBS_NAME_C=`onstat -d | $AWK -v dbs_name="$DBS_NAME" '$NF==dbs_name{print dbs_name}'`
+   if [ "$DBS_NAME_C" != "$DBS_NAME" ] ; then echo "ZBX_NOTSUPPORTED" ; exit 1 ; fi
+   unset DBS_NAME_C
+
+   # Get size info
+   onstat -d | $AWK -v dbs_num="$DBS_NUM" -v dbs_name="$DBS_NAME" '
+      BEGIN { dbs_total="" ; dbs_free="" }
+      #$NF==dbs_name { dbs_num=$2 ; pgsize=$6/1024 } 
+      $NF==dbs_name { dbs_num=$2 ; pgsize=$6 } 
+      $3==dbs_num && NF>=8 { dbs_total=dbs_total+$5; dbs_free=dbs_free+$6} 
+      END{
+          if ( dbs_total != ""  )
+            {
+                dbs_total = dbs_total * pgsize
+                dbs_free  = dbs_free  * pgsize
+
+                dbs_used  = dbs_total - dbs_free
+                dbs_pfree = int(100*dbs_free/dbs_total)
+                dbs_pused = 100 - dbs_pfree
+
+                # Print JSON
+                #printf( "{\n")
+                #printf("\t\"%s\":{",dbs_name)
+                printf( "{ ")
+                printf("\"total\":%d,", dbs_total)
+                printf("\"free\":%d,",  dbs_free)
+                printf("\"used\":%d,",  dbs_used )
+                printf("\"pfree\":%d,", dbs_pfree )
+                printf("\"pused\":%d", dbs_pused )
+                printf( " }\n")
+                #printf( "}\n")
+             }
+            else
+            {
+                print "ZBX_NOTSUPPORTED"
+                #print 3
+             }
+
+       }'
+
+}
+# --------------------------------------------------------------------------------------------------------------------------------------------
+#dbs_list
+#dbs_size dbs01
+#dbs_size sbs01
+# --------------------------------------------------------------------------------------------------------------------------------------------
+# Running
+# Check IDS status. If Off-Line - print "IDS is unavailabale"
+check_ids
+
+case $1 in
+  "discovery" )  	dbs_list ; exit ;;
+  "size" )  	dbs_size  $2 ; exit ;;
+  * ) 		echo "ZBX_NOTSUPPORTED" ; exit 1 ;;
+esac
+# --------------------------------------------------------------------------------------------------------------------------------------------

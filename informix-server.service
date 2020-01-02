@@ -10,7 +10,7 @@
 # ------------------------------------------------------------------
 
 [Unit]
-Description=Informix IDS Database Server
+Description=IBM Informix Database Server
 Documentation=file:/opt/IBM/informix/release/en_us/0333 http://www.ibm.com/software/data/informix/library.html
 Wants=network-online.target
 After=network.target network-online.target

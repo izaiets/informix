@@ -1,0 +1,640 @@
+#!/bin/sh
+# --------------------------------------------------------------------------------------------------------------------------------------------
+# Script for zabbix monitoring IDS
+# Date: 2019-01-30
+# Owner: Igor Zaiets E-mail: zaiets@gmail.com
+# --------------------------------------------------------------------------------------------------------------------------------------------
+# set path to awk
+AWKSERV_OS=`uname`
+if [ "$AWKSERV_OS" = "SunOS" ] ; then AWK=/bin/nawk ; else AWK=/bin/awk ; fi
+# --------------------------------------------------------------------------------------------------------------------------------------------
+SH_DIR=/etc/zabbix/scripts
+# --------------------------------------------------------------------------------------------------------------------------------------------
+# Set IDS environments
+IDS_PROFILE=${SH_DIR}/ids.env
+test -f $IDS_PROFILE && . $IDS_PROFILE
+
+which onstat >/dev/null 2>&1
+if [ $? -ne 0 ]
+  then
+    echo "onstat: command not found"
+    exit
+fi
+# --------------------------------------------------------------------------------------------------------------------------------------------
+# IDS specific env.
+INFORMIXCONRETRY=1 ; export INFORMIXCONRETRY
+INFORMIXCONTIME=1  ; export INFORMIXCONTIME
+# --------------------------------------------------------------------------------------------------------------------------------------------
+# Script specific env
+# File for chunk statistics
+CHUNK_STAT_FILE=/tmp/zabbix.ids.chunk.stat
+# Check interval in sec. for chunk statistics
+CHUNK_INTERVAL=50
+# Interval for check when stat. no running
+OLDSTATINTERVAL=3600
+# --------------------------------------------------------------------------------------------------------------------------------------------
+# Check IDS for running
+check_ids () {
+   onstat - >/dev/null 2>&1
+   if [ $? -eq 255 ] ; then echo "IDS is unavailable" ; exit 1 ; fi
+}
+
+# --------------------------------------------------------------------------------------------------------------------------------------------
+# IDS Status
+get_ids_status ()
+{
+  # Get IDS Server status
+  IDS_SERVER_STATUS="UNKNOWN"
+  onstat - > /dev/null 2>&1
+  case $? in
+       0 ) IDS_SERVER_STATUS="Initialization" ;;
+       1 ) IDS_SERVER_STATUS="Quiescent" ;;
+       2 ) IDS_SERVER_STATUS="Recovery" ;;
+       3 ) IDS_SERVER_STATUS="Backup" ;;
+       4 ) IDS_SERVER_STATUS="Shutdown" ;;
+       5 ) IDS_SERVER_STATUS="On-Line" ;;
+       6 ) IDS_SERVER_STATUS="Abort" ;;
+       7 ) IDS_SERVER_STATUS="User" ;;
+     255 ) IDS_SERVER_STATUS="Off-Line" ;;
+  esac
+  echo "$IDS_SERVER_STATUS"
+}
+# --------------------------------------------------------------------------------------------------------------------------------------------
+# Get IDS BLOCKED status
+get_ids_blocked ()
+{
+  # If IDS Off-Line - exit
+  check_ids
+  IDS_SERVER_BLOCKED=`onstat - | $AWK -F":" '$1=="Blocked"{print $2}'`
+
+  IDS_SERVER_BLOCKED=${IDS_SERVER_BLOCKED:-"None"}
+  echo "$IDS_SERVER_BLOCKED"
+}
+# --------------------------------------------------------------------------------------------------------------------------------------------
+# Log info
+get_ids_loginfo () {
+   check_ids
+   onstat -l | $AWK '
+      BEGIN{ logs_nobck=0 ; phl_numpages=0 ; phl_numwrits=0 ; phl_pages_io=0 ; physize=0 ; phyused=0; phl_puse=0 ;numrecs=0 ; numpages=0 ; numwrits=0}
+
+      $1$2=="PhysicalLogging" { getline ; getline ; phl_numpages=$4 ; phl_numwrits=$5 ; phl_pages_io=$6 ; 
+				getline ; getline ; physize=$2 ; phyused=$4  ; phl_puse=$5 }
+      $1$2=="LogicalLogging"  { getline ; getline ; numrecs=$4 ; numpages=$5 ; numwrits=$6 }
+
+      NF==8&&length($3)==7&&substr($3,1,1)=="U"&&substr($3,3,1)!="B"&&substr($3,5,1)!="C"{ logs_nobck=logs_nobck + 1 }
+      NF==4 && $NF=="total" { logs_total = $3 }
+      NF==8&&length($3)==7&&substr($3,5,1)=="C"{logs_curr=$4 ; log_size=$6 ; cur_position=$7}
+
+      END{
+	printf("{\n" )
+	#printf("  \"recovery_logs\":\n" )
+	#printf("\t{\n" )
+
+	printf("\t\"total\":%d,\n"			, logs_total )
+	printf("\t\"nobackuped\":%d,\n"			, logs_nobck )
+	printf("\t\"current\":%d,\n"			, logs_curr)
+	printf("\t\"current_log_position\":%d,\n"	, (logs_curr-1)*log_size+cur_position)
+
+	printf("\t\"phys_numpages\":%d,\n",phl_numpages )
+	printf("\t\"phys_numwrits\":%d,\n",phl_numwrits )
+	printf("\t\"phys_pages_io\":%d,\n",phl_pages_io )
+	printf("\t\"phys_physize\":%d,\n" ,physize )
+	printf("\t\"phys_phyused\":%d,\n" ,phyused )
+	printf("\t\"phys_puse\":%d,\n"    ,phl_puse )
+
+	printf("\t\"log_numrecs\":%d,\n",  numrecs )
+	printf("\t\"log_numpages\":%d,\n", numpages )
+	printf("\t\"log_numwrits\":%d\n",  numwrits )
+
+	#printf("\t}\n" )
+	printf("}\n" )
+
+    }'
+}
+# --------------------------------------------------------------------------------------------------------------------------------------------
+# Get uptime in utc
+# IBM Informix Dynamic Server Version 12.10.FC9 -- On-Line -- Up 03:59:16 -- 7490264 Kbytes
+# IBM Informix Dynamic Server Version 11.70.FC5XE -- On-Line -- Up 1 days 12:53:46 -- 193024096 Kbytes
+
+get_ids_uptime () {
+   check_ids
+   onstat - | grep Informix | $AWK '
+     {   
+        run_days =$(NF-5) ; gsub("--",0,run_days)
+	run_hour = substr($(NF-3),1,2)
+	run_min  = substr($(NF-3),4,2)
+	run_sec  = substr($(NF-3),7,2)
+
+	run_time = run_days*86400 + run_hour*3600 + run_min*60 + run_sec
+     }
+     END {print run_time }' 
+}
+# --------------------------------------------------------------------------------------------------------------------------------------------
+# Get IDS boottime in UTC
+get_ids_boottime () {
+   check_ids
+   RUNNING_TIME=`get_ids_uptime`
+   CURRENT_UTC=`perl -e "print time"`
+   IDS_BOOTTIME=`expr $CURRENT_UTC - $RUNNING_TIME`
+   echo $IDS_BOOTTIME
+}
+# --------------------------------------------------------------------------------------------------------------------------------------------
+# Start Get profile statistics. Return JSON.
+get_ids_profile () {
+   check_ids
+   onstat -p | $AWK '
+	$1=="dskreads" {getline ; dskreads=$1; pagreads=$2; bufreads=$3; read_pcached=$4; dskwrits=$5; pagwrits=$6; bufwrits=$7; write_pcached=$8; }
+
+	$1=="isamtot"  {getline ; isamtot=$1 ; open=$2 ; start=$3 ; read=$4 ; write=$5 ; rewrite=$6 ; idelete=$7 ; commit=$8 ; rollbk=$9 ; }
+
+	$1=="gp_read"  {getline ; gp_read=$1 ; gp_write=$2 ; gp_rewrt=$3 ; gp_del=$4 ; gp_alloc=$5 ; gp_free=$6 ; gp_curs=$7 ; }
+
+	$1=="ovlock"   {getline ; ovlock=$1 ; ovuserthread=$2 ; ovbuff=$3 ; usercpu=$4 ; syscpu=$5 ; numckpts=$6 ; flushes=$7 ; }
+
+	$1=="bufwaits" {getline ; bufwaits=$1 ; lokwaits=$2 ; lockreqs=$3 ; deadlks=$4 ; dltouts=$5 ; ckpwaits=$6 ; compress=$7 ; seqscans=$8 ; }
+
+	$1=="ixda-RA"  {getline ; ixda_RA=$1 ; idx_RA=$2 ; da_RA=$3 ; logrec_RA=$4 ; RA_pgsused=$5 ; lchwaits=$6 ; }
+   END {
+	printf("{\n" )
+	#printf("  \"profile\":\n" )
+	#printf("\t{\n" )
+
+	printf("\t\"dskreads\":%d,\n", dskreads     )
+	printf("\t\"pagreads\":%d,\n", pagreads     )
+	printf("\t\"bufreads\":%d,\n", bufreads     )
+	printf("\t\"read_pcached\":%d,\n",read_pcached      )
+
+	printf("\t\"dskwrits\":%d,\n", dskwrits     )
+	printf("\t\"pagwrits\":%d,\n", pagwrits    )
+	printf("\t\"bufwrits\":%d,\n", bufwrits     )
+	printf("\t\"write_pcached\":%d,\n",  write_pcached    )
+
+	printf("\t\"isamtot\":%d,\n", isamtot     )
+	printf("\t\"open\":%d,\n", open     )
+	printf("\t\"start\":%d,\n", start     )
+	printf("\t\"read\":%d,\n", read     )
+	printf("\t\"write\":%d,\n", write     )
+	printf("\t\"rewrite\":%d,\n", rewrite     )
+	printf("\t\"delete\":%d,\n", idelete     )
+	printf("\t\"commit\":%d,\n", commit     )
+	printf("\t\"rollbk\":%d,\n", rollbk     )
+
+	printf("\t\"gp_read\":%d,\n", gp_read     )
+	printf("\t\"gp_write\":%d,\n", gp_write     )
+	printf("\t\"gp_rewrt\":%d,\n", gp_rewrt     )
+	printf("\t\"gp_del\":%d,\n",  gp_del    )
+	printf("\t\"gp_alloc\":%d,\n",  gp_alloc    )
+	printf("\t\"gp_free\":%d,\n", gp_free     )
+	printf("\t\"gp_curs\":%d,\n", gp_curs     )
+
+	printf("\t\"ovlock\":%d,\n", ovlock     )
+	printf("\t\"ovuserthread\":%d,\n", ovuserthread     )
+	printf("\t\"ovbuff\":%d,\n", ovbuff     )
+	printf("\t\"usercpu\":%d,\n", usercpu     )
+	printf("\t\"syscpu\":%d,\n", syscpu     )
+	printf("\t\"numckpts\":%d,\n", numckpts     )
+	printf("\t\"flushes\":%d,\n", flushes     )
+
+	printf("\t\"bufwaits\":%d,\n", bufwaits     )
+	printf("\t\"lokwaits\":%d,\n", lokwaits     )
+	printf("\t\"lockreqs\":%d,\n", lockreqs     )
+	printf("\t\"deadlks\":%d,\n",  deadlks    )
+	printf("\t\"dltouts\":%d,\n",  dltouts    )
+	printf("\t\"ckpwaits\":%d,\n", ckpwaits     )
+	printf("\t\"compress\":%d,\n", compress     )
+	printf("\t\"seqscans\":%d,\n", seqscans     )
+
+	printf("\t\"ixda_RA\":%d,\n",  ixda_RA    )
+	printf("\t\"idx_RA\":%d,\n",  idx_RA    )
+	printf("\t\"da_RA\":%d,\n", da_RA     )
+	printf("\t\"logrec_RA\":%d,\n", logrec_RA      )
+	printf("\t\"RA_pgsused\":%d,\n", RA_pgsused )
+	printf("\t\"lchwaits\":%d\n", lchwaits     )
+
+	#printf("\t}\n" )
+	printf("}\n" )
+   }'
+
+}
+# End Get profile statistics
+# --------------------------------------------------------------------------------------------------------------------------------------------
+# Start Informix memory size statistics (global). Return JSON
+get_ids_memory () {
+ check_ids
+ SESMEM=`onstat -g ses | $AWK '
+	BEGIN{}
+	NF==9&&NR>5 { 
+		total = total + $7  
+		used = used + $8 
+		ses = sses + 1
+		if ( $7 > ses_tmax) ses_tmax = $7
+		if ( $8 > ses_umax) ses_umax = $8
+	}
+	END{
+		#total = int(total/1024)
+		#used  = int(used/1024)
+		#ses_tmax = int(ses_tmax/1024)
+		#ses_umax = int(ses_umax/1024)
+
+		# Average session used memory
+		#ses_tavg = int(total/ses/1024)
+		ses_tavg = int(total/1024)
+
+		# Average session total memory
+		#ses_uavg = int(used/ses/1024)
+		ses_uavg = int(used/ses)
+
+	     printf("%d:%d:%d:%d:%d:%d:%d",total,used,total-used,ses_tmax,ses_umax,ses_tavg,ses_uavg)
+	}'`
+
+ onstat -g seg | $AWK -v sesmem="$SESMEM" '
+        BEGIN { 
+		total = 0 ; used=0 ; free=0 ; r_size=0; seg=0; v_size=0; v_used=0 ; v_free=0 ; m_size=0 
+		split(sesmem,ses,":")
+		ses_alloc=ses[1]
+		ses_used=ses[2]
+		ses_free=ses[3]
+		ses_amax=ses[4]
+		ses_umax=ses[5]
+		ses_aavg=ses[6]
+		ses_uavg=ses[7]
+	}
+	# Total memory
+	#$1=="Total:"{ total=int($4/1024) ; used=$7*4 ; free=$8*4 }
+	$1=="Total:"{ total=$4 ; used=$7*4096 ; free=$8*4096 }
+
+	# Resident and Buffer
+        substr($6,1,1) == "R" || substr($6,1,1) == "B" {r_size = r_size + $4  ; seg = seg + 1 }
+
+	# Virtual and Virtual Extend
+        substr($6,1,1) == "V" {v_size = v_size + $4 ; v_used = v_used + $7 ; v_free = v_free + $8 ; seg = seg + 1 }
+
+	# Message segment
+        substr($6,1,1) == "M" {m_size = m_size + $4 ; seg = seg + 1 }
+
+        END{
+	# Returning in KB
+	#v_used = v_used*4 ; v_free = v_free*4
+	v_used = v_used*4096 ; v_free = v_free*4096
+	#r_size = int(r_size/1024) ; v_size = int(v_size/1024) ; m_size = int(m_size/1024)
+	# print JSON
+	printf("{\n" )
+
+	printf("\t\"alloc\":%d,\n", total )
+	printf("\t\"free\":%d,\n" , free  )
+	printf("\t\"used\":%d,\n" , used  )
+	printf("\t\"seg\":%d,\n"  , seg   )
+
+	printf("\t\"r_size\":%d,\n", r_size  )
+	printf("\t\"m_size\":%d,\n", m_size  )
+	printf("\t\"v_size\":%d,\n", v_size  )
+	printf("\t\"v_free\":%d,\n", v_free  )
+	printf("\t\"v_used\":%d,\n" , v_used  )
+
+	printf("\t\"ses_alloc\":%d,\n" , ses_alloc )
+	printf("\t\"ses_used\":%d,\n"  , ses_used  )
+	printf("\t\"ses_free\":%d,\n"  , ses_free  )
+	printf("\t\"ses_amax\":%d,\n"  , ses_amax  )
+	printf("\t\"ses_umax\":%d,\n"  , ses_umax  )
+	printf("\t\"ses_aavg\":%d,\n"  , ses_aavg  )
+	printf("\t\"ses_uavg\":%d\n"   , ses_uavg  )
+
+	printf("}\n" )
+	}'
+}
+# END Informix memory size statistics (global)
+# --------------------------------------------------------------------------------------------------------------------------------------------
+# Start. Function fot collect statistics into file
+chunk_collect_io () {
+  check_ids
+  # Check permissions of CHUNK_STAT_FILE
+  if [ -f $CHUNK_STAT_FILE ]
+    then
+        STAT_FILE_OWNER=`ls -al $CHUNK_STAT_FILE | awk '{print $3}'`
+        STAT_FILE_PERM=` ls -al $CHUNK_STAT_FILE | awk '{print substr($3,1,3)}'`
+
+        if [ "$STAT_FILE_OWNER" != "informix" -a "STAT_FILE_PERM" != "-rw" ]
+          then
+                echo "$CHUNK_STAT_FILE:permission error"
+                exit 1
+        fi
+     else
+	touch $CHUNK_STAT_FILE >/dev/null 2>&1
+	if [ $? -ne 0 ]
+	  then
+	     echo "Error create $CHUNK_STAT_FILE"
+	     exit 1
+	fi
+  fi
+   COLLECT_TIME=`date '+%s'`
+   test -f $CHUNK_STAT_FILE && LASTRUN_TIME1=`awk -F":" '$1=="LASTRUN_TIME"{print $2}' $CHUNK_STAT_FILE | head -1`
+   test -f $CHUNK_STAT_FILE && LASTRUN_TIME2=`awk -F":" '$1=="LASTRUN_TIME"{print $2}' $CHUNK_STAT_FILE | tail -1`
+   test -f $CHUNK_STAT_FILE && COLLECT_RUN=`grep -c LASTRUN_TIME $CHUNK_STAT_FILE | awk '{print $1}'`
+   LASTRUN_TIME1=${LASTRUN_TIME2:-0}
+   LASTRUN_TIME2=${LASTRUN_TIME2:-0}
+   COLLECT_RUN=${COLLECT_RUN:-0}
+   DELTA_TIME1=`expr $COLLECT_TIME - $LASTRUN_TIME1`
+   DELTA_TIME2=`expr $COLLECT_TIME - $LASTRUN_TIME2`
+
+   # If last starting statistics more then  OLDSTATINTERVAL
+   if [  $DELTA_TIME1 -ge $OLDSTATINTERVAL ]
+      then
+        if [  $COLLECT_RUN -ge 2   ]
+           then
+               echo "ids.chunk: Problem - old statistics. See $CHUNK_STAT_FILE"
+               exit 1
+        fi
+   fi
+   # ------
+   #echo "LASTRUN_TIME1 $LASTRUN_TIME1"
+   #echo "LASTRUN_TIME2 $LASTRUN_TIME2"
+   #echo ""
+   #echo "COLLECT_TIME  $COLLECT_TIME"
+   #echo ""
+   #echo "DELTA_TIME1   $DELTA_TIME1"
+   #echo "DELTA_TIME2   $DELTA_TIME2"
+   #echo "COLLECT_RUN   $COLLECT_RUN"
+   # ------
+
+   if [ $DELTA_TIME2  -ge $CHUNK_INTERVAL -a $COLLECT_RUN -le 1 ]
+      then
+        # Collect new statistics when last statistics old $CHUNK_INTERVAL
+        # Update time in CHUNK_STAT_FILE
+        echo "LASTRUN_TIME:$COLLECT_TIME" >> $CHUNK_STAT_FILE
+
+        # Create temp. file with statistics
+        TMP_STAT_FILE=`mktemp -t zabbix.ids.chunk.XXXXX`
+
+        # Adding LASTRUN_TIME
+        echo "LASTRUN_TIME:$COLLECT_TIME" > $TMP_STAT_FILE
+        # Parse onstat -g iof
+        onstat -g iof | $AWK '
+         BEGIN{
+             print "        1:         2:         3:          4:          5:  6:    7:    8:     9:        10:         11:     12:      13:14:     15"
+             print "chunkname:bytes_read:page_reads:bytes_write:page_writes:ios:seeks:reads:writes:kaio_reads:kaio_writes:bytes_rw:page_rw:rw:kaio_rw"
+
+             # Calculate total statistics
+             total_bytes_read  = 0
+             total_page_reads  = 0
+             total_bytes_write = 0
+             total_page_writes = 0
+             total_bytes_rw    = 0
+             total_page_rw     = 0
+             total_ios         = 0
+             total_seeks       = 0
+             total_reads       = 0
+             total_writes      = 0
+             total_rw          = 0
+             total_kaio_reads  = 0
+             total_kaio_writes = 0
+             total_kaio_rw     = 0
+           }
+         NF==7 && NR>5{
+             chunkname = $2 ; bytes_read = $3 ; page_reads = $4 ; bytes_write = $5 ; page_writes = $6 ; ios = $7 ;
+             getline ;
+             getline ; seeks = $2
+             getline ; reads = $2
+             getline ; writes = $2
+             getline ; kaio_reads = $2
+             getline ; kaio_writes = $2
+
+             bytes_rw = bytes_read + bytes_write
+             page_rw  = page_reads + page_writes
+             rw       = reads + writes
+             kaio_rw  = kaio_reads + kaio_writes
+
+             # Summary statistics for all chunks
+             total_bytes_read  = total_bytes_read  + bytes_read
+             total_page_reads  = total_page_reads  + page_reads
+             total_bytes_write = total_bytes_write + bytes_write
+             total_page_writes = total_page_writes + page_writes
+             total_ios         = total_ios         + ios
+             total_seeks       = total_seeks       + seeks
+             total_reads       = total_reads       + reads
+             total_writes      = total_writes      + writes
+             total_kaio_reads  = total_kaio_reads  + kaio_reads
+             total_kaio_writes = total_kaio_writes + kaio_write
+             total_bytes_rw    = total_bytes_rw    + bytes_rw
+             total_page_rw     = total_page_rw     + page_rw
+             total_rw          = total_rw          + rw
+             total_kaio_rw     = total_kaio_rw     + kaio_rw
+
+
+             # Output for chunk
+             # Format
+             #         1:         2:         3:          4:          5:  6:    7:    8:     9:        10:         11:     12:      13:14:     15
+             # chunkname:bytes_read:page_reads:bytes_write:page_writes:ios:seeks:reads:writes:kaio_reads:kaio_writes:bytes_rw:page_rw:rw:kaio_rw"
+             printf("%s:%d:%d:%d:%d:%d:%d:%d:%d:%d:%d:%d:%d:%d:%d\n",
+                   chunkname,bytes_read,page_reads,bytes_write,page_writes,ios,seeks,reads,writes,kaio_reads,kaio_writes,bytes_rw,page_rw,rw,kaio_rw)
+
+        }
+        END {
+             printf("%s:%d:%d:%d:%d:%d:%d:%d:%d:%d:%d:%d:%d:%d:%d\n",
+                   "Summary",total_bytes_read,total_page_reads,total_bytes_write,total_page_writes,total_ios,seeks,
+                    total_reads,total_writes,total_kaio_reads,total_kaio_writes,total_bytes_rw,total_page_rw,total_rw,total_kaio_rw)
+        }' >> $TMP_STAT_FILE
+        cp $TMP_STAT_FILE $CHUNK_STAT_FILE && rm -f $TMP_STAT_FILE
+   fi
+}
+# End. Function fot collect statistics into file
+# --------------------------------------------------------------------------------------------------------------------------------------------
+# START IDS chunk statistics
+chunk_stat () {
+   CHUNKNAME=$1
+   if [ "x$CHUNKNAME" = "x" ]
+     then
+	echo "chunkname not set"
+	exit 1
+   fi
+   # Start collect statistics
+   chunk_collect_io
+
+   $AWK -v chunkname="$CHUNKNAME"  -F":" '
+        $1==chunkname{
+           #         1:         2:         3:          4:          5:  6:    7:    8:     9:        10:         11:     12:      13:14:     15
+           # chunkname:bytes_read:page_reads:bytes_write:page_writes:ios:seeks:reads:writes:kaio_reads:kaio_writes:bytes_rw:page_rw:rw:kaio_rw
+           bytes_read = $2 ; page_reads = $3 ; bytes_write = $4 ; page_writes = $5 ; ios = $6 ;
+           seeks = $7 ; reads = $8 ; writes = $9 ; kaio_reads = $10 ; kaio_writes = $11; bytes_rw = $12 ; page_rw = $13 ; rw = $14 ; kaio_rw = $15
+
+            #printf("\t { ")
+            #printf("\"name\":\"%s\","        , chunkname )
+            printf("{ " )
+            printf("\"bytes_read\":%d,"  , bytes_read )
+            printf("\"page_reads\":%d,"  , page_reads )
+            printf("\"bytes_write\":%d," , bytes_write )
+            printf("\"page_writes\":%d," , page_writes )
+            printf("\"ios\":%d,"         , ios )
+            printf("\"seeks\":%d,"       , seeks )
+            printf("\"reads\":%d,"       , reads )
+            printf("\"writes\":%d,"      , writes )
+            printf("\"kaio_reads\":%d,"  , kaio_reads )
+            printf("\"kaio_writes\":%d," , kaio_writes )
+
+            printf("\"bytes_rw\":%d,"    , bytes_rw )
+            printf("\"page_rw\":%d,"     , page_rw  )
+            printf("\"rw\":%d,"          , rw )
+            printf("\"kaio_rw\":%d"      , kaio_rw  )
+            printf(" }\n")
+
+            num_ch = 1
+         }
+
+        END{ if ( num_ch != "1" ) { printf("ids.chunk: %s nor exists\n",chunkname) } }' $CHUNK_STAT_FILE
+}
+# END (ids_chunk_stat)  IDS chunk statistics
+# --------------------------------------------------------------------------------------------------------------------------------------------
+# START ids.chunk.discovery
+chunk_discovery () {
+	check_ids
+	# Print discovery JSON
+	onstat -g iof | $AWK '
+	BEGIN{
+            printf("{\n")
+            printf("   \"data\": [\n")
+            num_ch=0
+          }
+	NF==7 && NR>5{
+            if ( num_ch == 1 ) { printf(",\n") }
+            printf("\t\t{ \"{#CHUNK_NAME}\": \"%s\" }",$2)
+            num_ch = 1
+         }
+
+   	END{
+            if ( num_ch == 1 ) { printf(",\n") }
+            printf("\t\t{ \"{#CHUNK_NAME}\": \"%s\" }","Summary" )
+            printf("\n   ]\n")
+            printf("}\n")
+      	}'
+}
+# END ids.chunk.discovery
+# --------------------------------------------------------------------------------------------------------------------------------------------
+# START ids_thread 
+ids_thread() {
+    check_ids
+
+    (
+    # onstat -u statistics
+    onstat -u | $AWK '
+    BEGIN { thread_B=0; thread_C=0; thread_G=0; thread_L=0; thread_S=0; thread_T=0; thread_Y=0 ; thread_X=0}
+    NR>5 && NF==10 {
+        # B - Waiting for a buffer
+	# C - Waiting for a checkpoint
+	# G - Waiting for a write of the logical-log buffer
+	# L - Waiting for a lock
+	# S - Waiting for mutex
+	# T - Waiting for a transaction
+	# Y - Waiting for condition
+	# X - Waiting  for a transaction cleanup (rollback)
+
+
+        if (substr($2,1,1) == "B" ) thread_B = thread_B + 1
+        if (substr($2,1,1) == "C" ) thread_C = thread_C + 1
+        if (substr($2,1,1) == "G" ) thread_G = thread_G + 1
+        if (substr($2,1,1) == "L" ) thread_L = thread_L + 1
+        if (substr($2,1,1) == "S" ) thread_S = thread_S + 1
+        if (substr($2,1,1) == "T" ) thread_T = thread_T + 1
+        if (substr($2,1,1) == "Y" ) thread_Y = thread_Y + 1
+        if (substr($2,1,1) == "X" ) thread_X = thread_X + 1
+
+
+	}
+	END {
+	print "thread_B:" thread_B
+	print "thread_C:" thread_C
+	print "thread_G:" thread_G
+	print "thread_L:" thread_L
+	print "thread_S:" thread_S
+	print "thread_T:" thread_T
+	print "thread_Y:" thread_Y
+	print "thread_X:" thread_X
+	}' 
+
+    # onstat -g act
+    thread_sqlexec_run=`onstat -g act | grep -c sqlexe`
+    echo "thread_sqlexec_run:$thread_sqlexec_run"
+
+    # onstat -g wai
+    thread_IO_wait=`onstat -g wai | grep -c "IO Wait"`
+    echo "thread_IO_wait:$thread_IO_wait"
+
+    # onstat -g rea
+    thread_ready=`onstat -g rea | grep -c ready`
+    echo "thread_ready:$thread_ready"
+
+    # onstat -g glo
+    onstat -g glo | $AWK '
+	$1=="sessions" { 
+		getline
+		# sessions - The number of sessions
+		# threads - The total number of threads
+		# vps - The total number of virtual processors
+		# lngspins - The number of times a thread had to spin more than 10,000 times to acquire a latch on a resource
+		# stat_time - The number of seconds over which the statistics were gathered ( after onstat -z or boot  )
+
+		print "sessions:"$1
+		print "threads:"$2
+		print "vps:"$3
+		print "lngspins:"$4
+		print "stat_time:"$5
+	}
+
+	$1$2=="schedcalls" { 
+		# sched_calls     -  The total number of scheduled calls
+		# thread_switches -  The total number of switches from one thread to another.
+		# yield_0         -  Statistics on thread yields, which occur when a thread can no longer continue its task until some condition occurs
+		# yield_n         -
+		# yield_forever   - 
+		getline 
+		print "sched_calls:"$2
+		print "thread_switches:"$3
+		print "yield_0:"$4
+		print "yield_n:"$5
+		print "yield_forever:"$6
+	}
+    '  )  | $AWK -F":" '
+		BEGIN{ printf "{ " ; num_r=0}
+		NF==2 && $2!="" {
+		   if ( num_r == 1 ) { printf(", ") }
+		   printf("\"%s\":%d",$1,$2)
+		   num_r = 1
+		}
+		END{ printf(" }\n") }'
+
+
+}
+# END ids_thread
+# --------------------------------------------------------------------------------------------------------------------------------------------
+#  START ids_vps
+ids_vps () {
+   case $1 in 
+	"discovery" )
+		exit ;;
+
+   esac
+}
+#  END ids_vps
+# --------------------------------------------------------------------------------------------------------------------------------------------
+# START ids_version
+ids_version () {
+   onstat -| grep Version | $AWK '{ print $6 }'
+}
+# END ids_version
+# --------------------------------------------------------------------------------------------------------------------------------------------
+case $1 in
+   "status"               )           get_ids_status       ; exit ;;
+   "version"              )           ids_version          ; exit ;;
+   "blocked"              )           get_ids_blocked      ; exit ;;
+   "rlogs"                )           get_ids_loginfo      ; exit ;;
+   "boottime"             )           get_ids_boottime     ; exit ;;
+   "uptime"               )           get_ids_uptime       ; exit ;;
+   "profile"              )           get_ids_profile      ; exit ;;
+   "memory"               )           get_ids_memory       ; exit ;;
+   "chunk_discovery"      )           chunk_discovery      ; exit ;;
+   "chunk_stat"           )           chunk_stat  $2       ; exit ;;
+   "thread"               )           ids_thread           ; exit ;;
+
+    * )
+	echo "ids.stat: \"$@\" Parameters not supported" ;
+	exit ;;
+esac
+# --------------------------------------------------------------------------------------------------------------------------------------------

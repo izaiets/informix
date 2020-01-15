@@ -7,6 +7,8 @@ zabbix          ALL=(informix) NOPASSWD: /etc/zabbix/scripts/ids.*
 4. Create file  /etc/zabbix/scripts/ids.stat with IDS environmets 
 5. Restart zabbix-agent
 
+Template_DB_Informix.xml - template for zabbix server.
+
 ---------------------------------------------------------------------------------------------------------------------
 Files:
 # ls -al /etc/zabbix/scripts/ids.* /etc/zabbix/zabbix_agentd.d/ids.conf

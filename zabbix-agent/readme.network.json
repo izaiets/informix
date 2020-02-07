@@ -1,23 +1,23 @@
 { 
    "global": {
-        "netscb_cur":"The current number of network session control blocks allocated since initialization (or onstat -z)",
-        "netscb_max":"The maximum number of network session control blocks allocated since initialization (or onstat -z)",
-        "connects":"The total number of connection requests since initialization",
-        "read":"The number of network reads performed by all threads",
-        "write":"The number of network writes performed by all threads",
-        "free_network_buffers_cur":"The maximum number of free network buffers since initialization",
-        "free_network_buffers_max":"The maximum number of free network buffers since initialization",
-        "th_network_buffers_free":"The threshold limit for buffers on the free network buffer queues",
-        "th_network_buffers_norm":"The threshold limit for buffers on the normal network buffer queues",
-        "network_buffers_exceed_free":"The number of times the limit for buffers on the free network buffer queues has been exceeded",
-        "network_buffers_exceed_norm":"The number of times the limit for buffers on the normal network buffer queues has been exceeded",
-        "network_buffers_alloc_cur":"The currently allocated number of network buffers",
-        "network_buffers_alloc_max":"The maximum allocated number of network buffers"
+        "netscb_cur":"Gauge and Counter. The current number of network session control blocks allocated since initialization (or onstat -z)",
+        "netscb_max":"Gauge.The maximum number of network session control blocks allocated since initialization (or onstat -z)",
+        "connects":"Gauge and Counter.The total number of connection requests since initialization",
+        "read":"Counter.The number of network reads performed by all threads",
+        "write":"Counter. The number of network writes performed by all threads",
+        "free_network_buffers_cur":"Gauge. The Current number of free network buffers since initialization",
+        "free_network_buffers_max":"Gauge. The maximum number of free network buffers since initialization",
+        "th_network_buffers_free":"Gauge and Counter.The threshold limit for buffers on the free network buffer queues",
+        "th_network_buffers_norm":"Gauge and Counter.The threshold limit for buffers on the normal network buffer queues",
+        "network_buffers_exceed_free":"Gauge and Counter. The number of times the limit for buffers on the free network buffer queues has been exceeded",
+        "network_buffers_exceed_norm":"Gauge and Counter. The number of times the limit for buffers on the normal network buffer queues has been exceeded",
+        "network_buffers_alloc_cur":"Gauge. The currently allocated number of network buffers",
+        "network_buffers_alloc_max":"Gauge. The maximum allocated number of network buffers"
    },
    "Client Type (sqlexec, srvinfx ...)":{
-   "Accepted":"The number of connections made by this type of client that were accepted",
-   "Rejected":"The number of connections made by this type of client that were rejected.. Reasons for being rejected include: authentication error (bad password etc),network error on the incoming connection, wrong mode (like single user/quiescent mode but a non-allowed type tries to connect,some problem starting up a new thread ",
-   "Read":"The number of read requests made",
-   "Write":"The number of write requests made"
+   "Accepted":"Counter. The number of connections made by this type of client that were accepted",
+   "Rejected":"Counter. The number of connections made by this type of client that were rejected.. Reasons for being rejected include: authentication error (bad password etc),network error on the incoming connection, wrong mode (like single user/quiescent mode but a non-allowed type tries to connect,some problem starting up a new thread ",
+   "Read":"Counter. The number of read requests made",
+   "Write":"Counter. The number of write requests made"
    },
  }

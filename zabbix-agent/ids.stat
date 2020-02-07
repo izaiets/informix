@@ -1,7 +1,7 @@
 #!/bin/sh
 # --------------------------------------------------------------------------------------------------------------------------------------------
 # Script for zabbix monitoring IDS
-# Date: 2019-01-30
+# Date: 2020-02-07
 # Owner: Igor Zaiets E-mail: zaiets@gmail.com
 # --------------------------------------------------------------------------------------------------------------------------------------------
 # set path to awk
@@ -604,6 +604,92 @@ ids_thread() {
 }
 # END ids_thread
 # --------------------------------------------------------------------------------------------------------------------------------------------
+# Start ids_network
+ids_network() {
+    check_ids
+    # onstat -g ntd statistics ( Print net dispatch information )
+    # See http://www.oninit.com/onstat/index.php?id=gimc
+    #     http://www.oninit.com/onstat/index.php?id=gntd
+    onstat -g ntd | $AWK '
+    BEGIN{
+      print "{"
+
+    }
+    $1=="#netscb"{
+        #   #netscb connects         read        write    q-free  q-limits  q-exceed alloc/max
+        # 8533/9467    17287    107930421    108576396  867/ 897 6260/  10    0/ 107 9409/   0
+        getline
+
+        n1=0
+
+        # #netscb - The current and maximum number of network session control blocks allocated since initialization (or onstat -z).
+        n1 = n1 + 1 ; split($(n1),n2,"/")
+        netscb_cur = n2[1]
+        if ( n2[2] == "") { netscb_max = $(n1+1) ; n1 = n1+1 } else { netscb_max = n2[2] }
+
+        # connects - The total number of connection requests since initialization.
+        n1 = n1 + 1 ; connects = $(n1)
+        # read - The number of network reads performed by all threads.
+        n1 = n1 + 1 ; read     = $(n1)
+        # write - The number of network writes performed by all threads.
+        n1 = n1 + 1 ; write    = $(n1)
+
+        # q-free - The current/maximum number of free network buffers since initialization
+        n1 = n1 + 1 ; split($(n1),n3,"/")
+        free_network_buffers_cur = n3[1]
+        if ( n3[2] == "") {  free_network_buffers_max = $(n1+1) ; n1 = n1+1 } else { free_network_buffers_max = n3[2] }
+
+        # q-limits - The threshold limit for buffers on the free/normal network buffer queues
+        n1 = n1 + 1 ; split($(n1),n4,"/")
+        th_network_buffers_free = n4[1]
+        if ( n4[2] == "") {  th_network_buffers_norm = $(n1+1) ; n1 = n1+1 } else { th_network_buffers_norm = n4[2] }
+        # q-exceed  - The number of times the limit for buffers on the free/normal network buffer queues has been exceeded
+        n1 = n1 + 1 ; split($(n1),n5,"/")
+        network_buffers_exceed_free = n5[1]
+        if ( n5[2] == "") {  network_buffers_exceed_norm = $(n1+1) ; n1 = n1+1 } else { network_buffers_exceed_norm = n5[2] }
+
+        # alloc/max - The currently allocated and maximum number of network buffers
+        n1 = n1 + 1 ; split($(n1),n6,"/")
+        network_buffers_alloc_cur = n6[1]
+        if ( n6[2] == "") {  network_buffers_alloc_max = $(n1+1) ; n1 = n1+1 } else { network_buffers_alloc_max = n5[2] }
+
+        printf ("   \"global\": { ")
+        printf("\n\t\"%s\":%d","netscb_cur",netscb_cur)
+        printf(",\n\t\"%s\":%d","netscb_max",netscb_max)
+
+        printf(",\n\t\"%s\":%d","connects",connects)
+        printf(",\n\t\"%s\":%d","read",read)
+        printf(",\n\t\"%s\":%d","write",write)
+
+        printf(",\n\t\"%s\":%d","free_network_buffers_cur",free_network_buffers_cur)
+        printf(",\n\t\"%s\":%d","free_network_buffers_max",free_network_buffers_max)
+
+        printf(",\n\t\"%s\":%d","th_network_buffers_free",th_network_buffers_free)
+        printf(",\n\t\"%s\":%d","th_network_buffers_norm",th_network_buffers_norm)
+
+        printf(",\n\t\"%s\":%d","network_buffers_exceed_free",network_buffers_exceed_free)
+        printf(",\n\t\"%s\":%d","network_buffers_exceed_norm",network_buffers_exceed_norm)
+
+        printf(",\n\t\"%s\":%d","network_buffers_alloc_cur",network_buffers_alloc_cur)
+        printf(",\n\t\"%s\":%d","network_buffers_alloc_max",network_buffers_alloc_max)
+
+        #printf(",\n\t\"%s\":%d","",)
+        #printf(",\n\t\"%s\":%d","",)
+
+        printf ("\n   }")
+    }
+
+   # Client Type     Calls   Accepted   Rejected       Read      Write
+   #sqlexec         yes      1122984         85  174725459  173785983
+
+     $2=="yes"{ printf(",\n   \"%s\":{\"Accepted\":%d,\"Rejected\":%d,\"Read\":%d,\"Write\":%d}",$1,$3,$4,$5,$6) }
+    END{
+        printf ("\n }\n")
+    }
+'
+}
+# END ids_network
+# --------------------------------------------------------------------------------------------------------------------------------------------
 #  START ids_vps
 ids_vps () {
    case $1 in 
@@ -632,9 +718,10 @@ case $1 in
    "chunk_discovery"      )           chunk_discovery      ; exit ;;
    "chunk_stat"           )           chunk_stat  $2       ; exit ;;
    "thread"               )           ids_thread           ; exit ;;
-
+   "network"              )           ids_network          ; exit ;;
     * )
 	echo "ids.stat: \"$@\" Parameters not supported" ;
+	tail -21 $0
 	exit ;;
 esac
 # --------------------------------------------------------------------------------------------------------------------------------------------

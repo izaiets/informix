@@ -19,3 +19,8 @@ lrwxrwxrwx    1 root     system           20 Jun 13 2018  /etc/zabbix/scripts/id
 
 ids.env - my profile with Informix environmets
 ---------------------------------------------------------------------------------------------------------------------
+
+
+History:
+2019-01-30 - First release.
+2020-02-07 - Added network statistics. Description ids.stat network JSON in readme.network.json.
